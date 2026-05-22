@@ -268,6 +268,25 @@ app.get('/api/comments', async (req, res) => {
   }
 });
 
+// ── GET /api/comments/stats ───────────────────────────────────────────────────
+app.get('/api/comments/stats', async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        COUNT(*) FILTER (WHERE is_pele = true)          AS pele,
+        COUNT(*) FILTER (WHERE player_name = 'Neymar')  AS neymar
+      FROM comments
+    `);
+    res.json({
+      pele:   parseInt(result.rows[0].pele),
+      neymar: parseInt(result.rows[0].neymar),
+    });
+  } catch (err) {
+    console.error('[GET /api/comments/stats]', err.message);
+    res.status(500).json({ error: 'Erro no banco de dados' });
+  }
+});
+
 // ── POST /api/comments/:id/like ───────────────────────────────────────────────
 app.post('/api/comments/:id/like', async (req, res) => {
   const { id } = req.params;
