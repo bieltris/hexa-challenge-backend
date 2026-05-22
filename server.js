@@ -265,6 +265,25 @@ app.get('/api/comments', async (req, res) => {
   }
 });
 
+// ── GET /api/comments/top-rooms ──────────────────────────────────────────────
+app.get('/api/comments/top-rooms', async (req, res) => {
+  try {
+    const [pele, neymar, chico] = await Promise.all([
+      pool.query(`SELECT sala, COUNT(*)::int AS count FROM comments WHERE is_pele = true GROUP BY sala ORDER BY count DESC LIMIT 1`),
+      pool.query(`SELECT sala, COUNT(*)::int AS count FROM comments WHERE player_name = 'Neymar' GROUP BY sala ORDER BY count DESC LIMIT 1`),
+      pool.query(`SELECT sala, COUNT(*)::int AS count FROM comments WHERE player_name = 'Chico'  GROUP BY sala ORDER BY count DESC LIMIT 1`),
+    ]);
+    res.json({
+      pele:   pele.rows[0]   ?? null,
+      neymar: neymar.rows[0] ?? null,
+      chico:  chico.rows[0]  ?? null,
+    });
+  } catch (err) {
+    console.error('[GET /api/comments/top-rooms]', err.message);
+    res.status(500).json({ error: 'Erro no banco de dados' });
+  }
+});
+
 // ── GET /api/comments/stats ───────────────────────────────────────────────────
 app.get('/api/comments/stats', async (req, res) => {
   try {
