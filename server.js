@@ -12,26 +12,26 @@ app.use(express.json());
 
 // ── Jogadores ─────────────────────────────────────────────────────────────────
 const PLAYERS = [
-  { id:1,  name:'Vinicius Jr.',    photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/3/37/Vinicius_Junior_2023.jpg/440px-Vinicius_Junior_2023.jpg', is_pele:false },
-  { id:2,  name:'Rodrygo',         photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/7/7e/Rodrygo_Goes_2023.jpg/440px-Rodrygo_Goes_2023.jpg',        is_pele:false },
-  { id:3,  name:'Endrick',         photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8d/Endrick_Felipe_Moreira_de_Sousa.jpg/440px-Endrick_Felipe_Moreira_de_Sousa.jpg', is_pele:false },
-  { id:4,  name:'Raphinha',        photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/7/79/Raphael_Dias_Belloli_2022.jpg/440px-Raphael_Dias_Belloli_2022.jpg', is_pele:false },
-  { id:5,  name:'Bruno Guimarães', photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/1/1e/Bruno_Guimar%C3%A3es_2022.jpg/440px-Bruno_Guimar%C3%A3es_2022.jpg', is_pele:false },
-  { id:6,  name:'Casemiro',        photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Casemiro_2022.jpg/440px-Casemiro_2022.jpg',           is_pele:false },
-  { id:7,  name:'Marquinhos',      photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/2/2f/Marquinhos_2023.jpg/440px-Marquinhos_2023.jpg',         is_pele:false },
-  { id:8,  name:'Alisson',         photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/d/d4/Alisson_Becker_2022.jpg/440px-Alisson_Becker_2022.jpg', is_pele:false },
-  { id:9,  name:'Martinelli',      photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a4/Gabriel_Martinelli_2022.jpg/440px-Gabriel_Martinelli_2022.jpg', is_pele:false },
-  { id:10, name:'Richarlison',     photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/Richarlison_2023.jpg/440px-Richarlison_2023.jpg',       is_pele:false },
-  { id:11, name:'Pelé',            photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/5/5e/Pel%C3%A9_col%C3%B4nia_1980.jpg/440px-Pel%C3%A9_col%C3%B4nia_1980.jpg', is_pele:true },
-  { id:12, name:'Ronaldo R9',      photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/9/98/Ronaldo-Gol-Mineirao.jpg/440px-Ronaldo-Gol-Mineirao.jpg', is_pele:false },
-  { id:13, name:'Ronaldinho',      photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/9/9b/Ronaldinho_Gau%C3%BAcho_2012.jpg/440px-Ronaldinho_Gau%C3%BAcho_2012.jpg', is_pele:false },
-  { id:14, name:'Zico',            photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/6/6e/Zico_1981.jpg/440px-Zico_1981.jpg',                    is_pele:false },
-  { id:15, name:'Sócrates',        photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/5/58/Socrates_1982.jpg/440px-Socrates_1982.jpg',             is_pele:false },
-  { id:16, name:'Cafu',            photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/Cafu_2007.jpg/440px-Cafu_2007.jpg',                    is_pele:false },
-  { id:17, name:'Roberto Carlos',  photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/d/d4/Roberto_Carlos_2018.jpg/440px-Roberto_Carlos_2018.jpg', is_pele:false },
-  { id:18, name:'Rivaldo',         photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/8/8b/Rivaldo_2007.jpg/440px-Rivaldo_2007.jpg',              is_pele:false },
-  { id:19, name:'Garrincha',       photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/d/d4/Garrincha_1958.jpg/440px-Garrincha_1958.jpg',          is_pele:false },
-  { id:20, name:'Romário',         photo:'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Rom%C3%A1rio_2010.jpg/440px-Rom%C3%A1rio_2010.jpg',    is_pele:false },
+  { id:1,  name:'Vinicius Jr.',    photo:'assets/images/vinicius_junior.jpeg',      is_pele:false },
+  { id:2,  name:'Rodrygo',         photo:'assets/images/rodrygo.webp',               is_pele:false },
+  { id:3,  name:'Endrick',         photo:'assets/images/endrick.webp',               is_pele:false },
+  { id:4,  name:'Raphinha',        photo:'assets/images/raphinha.jpg',               is_pele:false },
+  { id:5,  name:'Bruno Guimarães', photo:'assets/images/Bruno-Guimaraes.jpg',        is_pele:false },
+  { id:6,  name:'Casemiro',        photo:'assets/images/casemiro.webp',              is_pele:false },
+  { id:7,  name:'Marquinhos',      photo:'assets/images/marquinhos.webp',            is_pele:false },
+  { id:8,  name:'Alisson',         photo:'assets/images/alysson.webp',               is_pele:false },
+  { id:9,  name:'Martinelli',      photo:'assets/images/gabriel-martinelli-atacante-da-selecao-brasileira-comemora-gol-marcado-em-amistoso-contra-a-croacia-em-orlando-eua-1775695606855_v2_450x450.jpg', is_pele:false },
+  { id:10, name:'Richarlison',     photo:'assets/images/RICHARLISON.jpg',            is_pele:false },
+  { id:11, name:'Pelé',            photo:'assets/images/pelé.png',                   is_pele:true  },
+  { id:12, name:'Ronaldo R9',      photo:'assets/images/ronaldo_r9.jpg',             is_pele:false },
+  { id:13, name:'Ronaldinho',      photo:'assets/images/ronaldinho.webp',            is_pele:false },
+  { id:14, name:'Zico',            photo:'assets/images/zico.jpg',                   is_pele:false },
+  { id:15, name:'Sócrates',        photo:'assets/images/socrates.png',               is_pele:false },
+  { id:16, name:'Cafu',            photo:'assets/images/cafu.jpg',                   is_pele:false },
+  { id:17, name:'Roberto Carlos',  photo:'assets/images/roberto_carlos.webp',        is_pele:false },
+  { id:18, name:'Rivaldo',         photo:'assets/images/rivaldo.webp',               is_pele:false },
+  { id:19, name:'Garrincha',       photo:'assets/images/Garrincha.webp',             is_pele:false },
+  { id:20, name:'Romário',         photo:'assets/images/romario.webp',               is_pele:false },
 ];
 
 // ── Perguntas ─────────────────────────────────────────────────────────────────
@@ -247,7 +247,9 @@ app.get('/api/comments', async (req, res) => {
     const result = await pool.query(
       `SELECT id, sala, body, player_name, player_photo, is_pele, created_at, likes
          FROM comments
-        ORDER BY is_pele DESC, created_at DESC
+        ORDER BY is_pele DESC,
+                 CASE WHEN player_name = 'Garrincha' THEN 0 ELSE 1 END,
+                 created_at DESC
         LIMIT 200`
     );
     res.json(result.rows);
