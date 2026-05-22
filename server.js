@@ -286,6 +286,24 @@ app.get('/api/comments/stats', async (req, res) => {
   }
 });
 
+// ── POST /api/suggestions ─────────────────────────────────────────────────────
+app.post('/api/suggestions', async (req, res) => {
+  const { body } = req.body;
+  if (!body || typeof body !== 'string' || body.trim().length < 2) {
+    return res.status(400).json({ error: 'body obrigatório (mín 2 chars)' });
+  }
+  try {
+    await pool.query(
+      'INSERT INTO suggestions(body) VALUES($1)',
+      [body.trim().slice(0, 1000)]
+    );
+    res.status(201).json({ ok: true });
+  } catch (err) {
+    console.error('[POST /api/suggestions]', err.message);
+    res.status(500).json({ error: 'Erro no banco de dados' });
+  }
+});
+
 // ── POST /api/comments/:id/like ───────────────────────────────────────────────
 app.post('/api/comments/:id/like', async (req, res) => {
   const { id } = req.params;
@@ -327,6 +345,12 @@ async function initDb() {
       opt_c    TEXT        NOT NULL,
       correct  CHAR(1)     NOT NULL CHECK(correct IN ('A','B','C')),
       category VARCHAR(20) NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS suggestions (
+      id         SERIAL PRIMARY KEY,
+      body       TEXT      NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
     );
 
     CREATE TABLE IF NOT EXISTS comments (
