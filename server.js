@@ -1,11 +1,15 @@
 require('dotenv').config();
 
+const http    = require('http');
 const express = require('express');
-const cors = require('cors');
+const cors    = require('cors');
+const { Server } = require('socket.io');
 const pool = require('./db');
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+const app    = express();
+const server = http.createServer(app);
+const io     = new Server(server, { cors: { origin: '*', methods: ['GET','POST'] } });
+const PORT   = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
@@ -235,7 +239,9 @@ app.post('/api/comments', async (req, res) => {
        VALUES($1,$2,$3,$4,$5) RETURNING *`,
       [sala, body.trim().slice(0, 500), player.name, player.photo, player.is_pele]
     );
-    res.status(201).json(result.rows[0]);
+    const comment = result.rows[0];
+    io.emit('new_comment', comment);
+    res.status(201).json(comment);
   } catch (err) {
     console.error('[POST /api/comments]', err.message);
     res.status(500).json({ error: 'Erro no banco de dados' });
@@ -334,5 +340,5 @@ async function initDb() {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 initDb()
-  .then(() => app.listen(PORT, () => console.log(`⚽ Hexa Challenge API rodando na porta ${PORT}`)))
+  .then(() => server.listen(PORT, () => console.log(`⚽ Hexa Challenge API rodando na porta ${PORT}`)))
   .catch(err => { console.error('Falha ao iniciar:', err); process.exit(1); });
