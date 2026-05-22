@@ -37,6 +37,7 @@ const PLAYERS = [
   { id:19, name:'Garrincha',       photo:'assets/images/Garrincha.webp',             is_pele:false },
   { id:20, name:'Romário',         photo:'assets/images/romario.webp',               is_pele:false },
   { id:21, name:'Neymar',          photo:'assets/images/neymar.webp',                is_pele:false },
+  { id:22, name:'Chico',           photo:'assets/images/chico.jpeg',                 is_pele:false },
 ];
 
 // ── Perguntas ─────────────────────────────────────────────────────────────────
