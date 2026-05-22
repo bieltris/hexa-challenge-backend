@@ -249,7 +249,9 @@ app.get('/api/comments', async (req, res) => {
       `SELECT id, sala, body, player_name, player_photo, is_pele, created_at, likes
          FROM comments
         ORDER BY is_pele DESC,
-                 CASE WHEN player_name = 'Garrincha' THEN 0 ELSE 1 END,
+                 CASE WHEN player_name = 'Neymar'    THEN 0
+                      WHEN player_name = 'Garrincha' THEN 1
+                      ELSE 2 END,
                  created_at DESC
         LIMIT 200`
     );
