@@ -271,12 +271,14 @@ app.get('/api/comments/stats', async (req, res) => {
     const result = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE is_pele = true)          AS pele,
-        COUNT(*) FILTER (WHERE player_name = 'Neymar')  AS neymar
+        COUNT(*) FILTER (WHERE player_name = 'Neymar')  AS neymar,
+        COUNT(*) FILTER (WHERE player_name = 'Chico')   AS chico
       FROM comments
     `);
     res.json({
       pele:   parseInt(result.rows[0].pele),
       neymar: parseInt(result.rows[0].neymar),
+      chico:  parseInt(result.rows[0].chico),
     });
   } catch (err) {
     console.error('[GET /api/comments/stats]', err.message);
