@@ -339,21 +339,23 @@ app.post('/api/suggestions', async (req, res) => {
 
 // ── POST /api/penalty ─────────────────────────────────────────────────────────
 app.post('/api/penalty', async (req, res) => {
-  const { sala, name } = req.body;
+  const { sala, name, points } = req.body;
   const VALID = ['6ano','7ano','8ano','9ano','1medio','2medio','3medio'];
   if (!sala || !VALID.includes(sala)) return res.status(400).json({ error: 'sala inválida' });
+  const deduct = (typeof points === 'number' && points >= 0) ? Math.min(Math.floor(points), 100) : 2;
+  if (deduct === 0) return res.json({ ok: true });
   try {
     await pool.query(
-      `UPDATE scores SET goals = GREATEST(0, goals - 2), updated_at = NOW() WHERE sala = $1`,
-      [sala]
+      `UPDATE scores SET goals = GREATEST(0, goals - $1), updated_at = NOW() WHERE sala = $2`,
+      [deduct, sala]
     );
     if (name && typeof name === 'string') {
       const cleanName = name.trim().slice(0, 100);
       if (cleanName.length > 0) {
         await pool.query(
-          `UPDATE player_scores SET goals = GREATEST(0, goals - 2), updated_at = NOW()
-           WHERE name = $1 AND sala = $2`,
-          [cleanName, sala]
+          `UPDATE player_scores SET goals = GREATEST(0, goals - $1), updated_at = NOW()
+           WHERE name = $2 AND sala = $3`,
+          [deduct, cleanName, sala]
         );
       }
     }
