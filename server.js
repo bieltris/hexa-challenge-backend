@@ -323,6 +323,42 @@ app.post('/api/suggestions', async (req, res) => {
   }
 });
 
+// ── POST /api/penalty ─────────────────────────────────────────────────────────
+app.post('/api/penalty', async (req, res) => {
+  const { sala } = req.body;
+  const VALID = ['6ano','7ano','8ano','9ano','1medio','2medio','3medio'];
+  if (!sala || !VALID.includes(sala)) return res.status(400).json({ error: 'sala inválida' });
+  try {
+    await pool.query(
+      `UPDATE scores SET goals = GREATEST(0, goals - 2), updated_at = NOW() WHERE sala = $1`,
+      [sala]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[POST /api/penalty]', err.message);
+    res.status(500).json({ error: 'Erro no banco' });
+  }
+});
+
+// ── POST /api/award ───────────────────────────────────────────────────────────
+app.post('/api/award', async (req, res) => {
+  const { sala, points } = req.body;
+  const VALID = ['6ano','7ano','8ano','9ano','1medio','2medio','3medio'];
+  if (!sala || !VALID.includes(sala) || typeof points !== 'number' || points < 1) {
+    return res.status(400).json({ error: 'sala e points obrigatórios' });
+  }
+  try {
+    await pool.query(
+      `UPDATE scores SET goals = goals + $1, updated_at = NOW() WHERE sala = $2`,
+      [Math.min(points, 100), sala]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[POST /api/award]', err.message);
+    res.status(500).json({ error: 'Erro no banco' });
+  }
+});
+
 // ── POST /api/comments/:id/like ───────────────────────────────────────────────
 app.post('/api/comments/:id/like', async (req, res) => {
   const { id } = req.params;
