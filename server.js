@@ -172,7 +172,7 @@ app.get('/api/scores', async (req, res) => {
 // ── POST /api/shoot ───────────────────────────────────────────────────────────
 // Body: { sala: "6ano", scored: true|false }
 app.post('/api/shoot', async (req, res) => {
-  const { sala, scored } = req.body;
+  const { sala, scored, name } = req.body;
 
   if (!sala || typeof scored !== 'boolean') {
     return res.status(400).json({ error: 'Campos obrigatórios: sala (string), scored (boolean)' });
@@ -196,6 +196,20 @@ app.post('/api/shoot', async (req, res) => {
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Sala não encontrada' });
+    }
+
+    // Registra pontuação individual se nome fornecido e gol marcado
+    if (scored && name && typeof name === 'string') {
+      const cleanName = name.trim().slice(0, 100);
+      if (cleanName.length > 0) {
+        await pool.query(
+          `INSERT INTO player_scores(name, sala, goals)
+           VALUES($1, $2, 1)
+           ON CONFLICT(name, sala)
+           DO UPDATE SET goals = player_scores.goals + 1, updated_at = NOW()`,
+          [cleanName, sala]
+        );
+      }
     }
 
     res.json(result.rows[0]);
@@ -325,7 +339,7 @@ app.post('/api/suggestions', async (req, res) => {
 
 // ── POST /api/penalty ─────────────────────────────────────────────────────────
 app.post('/api/penalty', async (req, res) => {
-  const { sala } = req.body;
+  const { sala, name } = req.body;
   const VALID = ['6ano','7ano','8ano','9ano','1medio','2medio','3medio'];
   if (!sala || !VALID.includes(sala)) return res.status(400).json({ error: 'sala inválida' });
   try {
@@ -333,6 +347,16 @@ app.post('/api/penalty', async (req, res) => {
       `UPDATE scores SET goals = GREATEST(0, goals - 2), updated_at = NOW() WHERE sala = $1`,
       [sala]
     );
+    if (name && typeof name === 'string') {
+      const cleanName = name.trim().slice(0, 100);
+      if (cleanName.length > 0) {
+        await pool.query(
+          `UPDATE player_scores SET goals = GREATEST(0, goals - 2), updated_at = NOW()
+           WHERE name = $1 AND sala = $2`,
+          [cleanName, sala]
+        );
+      }
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error('[POST /api/penalty]', err.message);
@@ -342,19 +366,48 @@ app.post('/api/penalty', async (req, res) => {
 
 // ── POST /api/award ───────────────────────────────────────────────────────────
 app.post('/api/award', async (req, res) => {
-  const { sala, points } = req.body;
+  const { sala, points, name } = req.body;
   const VALID = ['6ano','7ano','8ano','9ano','1medio','2medio','3medio'];
   if (!sala || !VALID.includes(sala) || typeof points !== 'number' || points < 1) {
     return res.status(400).json({ error: 'sala e points obrigatórios' });
   }
+  const safePoints = Math.min(points, 100);
   try {
     await pool.query(
       `UPDATE scores SET goals = goals + $1, updated_at = NOW() WHERE sala = $2`,
-      [Math.min(points, 100), sala]
+      [safePoints, sala]
     );
+    if (name && typeof name === 'string') {
+      const cleanName = name.trim().slice(0, 100);
+      if (cleanName.length > 0) {
+        await pool.query(
+          `INSERT INTO player_scores(name, sala, goals)
+           VALUES($1, $2, $3)
+           ON CONFLICT(name, sala)
+           DO UPDATE SET goals = player_scores.goals + $3, updated_at = NOW()`,
+          [cleanName, sala, safePoints]
+        );
+      }
+    }
     res.json({ ok: true });
   } catch (err) {
     console.error('[POST /api/award]', err.message);
+    res.status(500).json({ error: 'Erro no banco' });
+  }
+});
+
+// ── GET /api/players/scores ───────────────────────────────────────────────────
+app.get('/api/players/scores', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT name, sala, goals
+       FROM player_scores
+       ORDER BY goals DESC, updated_at ASC
+       LIMIT 50`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('[GET /api/players/scores]', err.message);
     res.status(500).json({ error: 'Erro no banco' });
   }
 });
@@ -406,6 +459,15 @@ async function initDb() {
       id         SERIAL PRIMARY KEY,
       body       TEXT      NOT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS player_scores (
+      id         SERIAL PRIMARY KEY,
+      name       VARCHAR(100) NOT NULL,
+      sala       VARCHAR(20)  NOT NULL,
+      goals      INTEGER      NOT NULL DEFAULT 0,
+      updated_at TIMESTAMP    NOT NULL DEFAULT NOW(),
+      UNIQUE(name, sala)
     );
 
     CREATE TABLE IF NOT EXISTS comments (
