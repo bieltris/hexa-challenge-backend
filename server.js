@@ -6,6 +6,13 @@ const cors    = require('cors');
 const { Server } = require('socket.io');
 const pool = require('./db');
 const { rankOf } = require('./ranks');
+const {
+  SALAS,
+  ensureTodayMissions,
+  startMissionScheduler,
+  updateMissionProgress,
+  notifyCompletion,
+} = require('./missions');
 
 const app    = express();
 const server = http.createServer(app);
@@ -14,6 +21,49 @@ const PORT   = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+
+const SALA_NAMES = {
+  '6ano': '6º Ano',
+  '7ano': '7º Ano',
+  '8ano': '8º Ano',
+  '9ano': '9º Ano',
+  '1medio': '1º Médio',
+  '2medio': '2º Médio',
+  '3medio': '3º Médio',
+};
+
+function toMissionDto(row) {
+  return {
+    id: row.id,
+    date: row.date instanceof Date ? row.date.toISOString().slice(0, 10) : row.date,
+    sala: row.sala,
+    salaName: SALA_NAMES[row.sala] || row.sala,
+    goalType: row.goal_type,
+    target: row.target,
+    reward: row.reward,
+    progress: row.progress,
+    completed: row.completed,
+    completedAt: row.completed_at instanceof Date ? row.completed_at.toISOString() : row.completed_at,
+    delivered: row.delivered,
+  };
+}
+
+function requireAdmin(req, res, next) {
+  const token = process.env.ADMIN_TOKEN;
+  if (!token || req.get('x-admin-token') !== token) {
+    return res.status(401).send('Não autorizado');
+  }
+  next();
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 // ── Jogadores ─────────────────────────────────────────────────────────────────
 const PLAYERS = [
@@ -179,8 +229,7 @@ app.post('/api/shoot', async (req, res) => {
     return res.status(400).json({ error: 'Campos obrigatórios: sala (string), scored (boolean)' });
   }
 
-  const VALID_SALAS = ['6ano', '7ano', '8ano', '9ano', '1medio', '2medio', '3medio'];
-  if (!VALID_SALAS.includes(sala)) {
+  if (!SALAS.includes(sala)) {
     return res.status(400).json({ error: 'Sala inválida' });
   }
 
@@ -216,9 +265,138 @@ app.post('/api/shoot', async (req, res) => {
       }
     }
 
-    res.json(result.rows[0]);
+    let mission = null;
+    if (scored) {
+      mission = await updateMissionProgress(sala, 1);
+      if (mission) {
+        const missionPayload = toMissionDto(mission);
+        io.emit('mission_update', missionPayload);
+        if (mission.just_completed) {
+          io.emit('mission_complete', missionPayload);
+          notifyCompletion(sala).catch((err) => {
+            console.error('[notifyCompletion]', err.message);
+          });
+        }
+      }
+    }
+
+    res.json({ ...result.rows[0], mission: mission ? toMissionDto(mission) : null });
   } catch (err) {
     console.error('[POST /api/shoot]', err.message);
+    res.status(500).json({ error: 'Erro no banco de dados' });
+  }
+});
+
+// ── Missões ──────────────────────────────────────────────────────────────────
+app.get('/api/missions/today', async (req, res) => {
+  try {
+    await ensureTodayMissions();
+    const result = await pool.query(
+      `SELECT *
+         FROM missions
+        WHERE date = CURRENT_DATE
+        ORDER BY CASE sala
+          WHEN '6ano' THEN 1 WHEN '7ano' THEN 2 WHEN '8ano' THEN 3
+          WHEN '9ano' THEN 4 WHEN '1medio' THEN 5 WHEN '2medio' THEN 6
+          WHEN '3medio' THEN 7 ELSE 99 END`
+    );
+    res.json(result.rows.map(toMissionDto));
+  } catch (err) {
+    console.error('[GET /api/missions/today]', err.message);
+    res.status(500).json({ error: 'Erro no banco de dados' });
+  }
+});
+
+app.get('/api/missions/history', async (req, res) => {
+  const sala = (req.query.sala || '').toString().trim();
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 1), 100);
+  if (!SALAS.includes(sala)) {
+    return res.status(400).json({ error: 'sala inválida' });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT *
+         FROM missions
+        WHERE sala = $1 AND completed = true
+        ORDER BY date DESC
+        LIMIT $2`,
+      [sala, limit]
+    );
+    res.json(result.rows.map(toMissionDto));
+  } catch (err) {
+    console.error('[GET /api/missions/history]', err.message);
+    res.status(500).json({ error: 'Erro no banco de dados' });
+  }
+});
+
+app.get('/admin/missions/today', requireAdmin, async (req, res) => {
+  try {
+    await ensureTodayMissions();
+    const result = await pool.query(
+      `SELECT *
+         FROM missions
+        WHERE date = CURRENT_DATE
+        ORDER BY completed DESC, delivered ASC, sala ASC`
+    );
+    const rows = result.rows.map((m) => `
+      <tr>
+        <td>${escapeHtml(SALA_NAMES[m.sala] || m.sala)}</td>
+        <td>${m.progress}/${m.target}</td>
+        <td>${m.completed ? 'Sim' : 'Não'}</td>
+        <td>${m.delivered ? 'Entregue' : 'Pendente'}</td>
+        <td><button onclick="deliverMission(${m.id})" ${m.delivered ? 'disabled' : ''}>marcar entregue</button></td>
+      </tr>
+    `).join('');
+    res.type('html').send(`
+      <!doctype html>
+      <html lang="pt-BR">
+        <head><meta charset="utf-8"><title>Missões de hoje</title></head>
+        <body>
+          <h1>Missões de hoje</h1>
+          <table border="1" cellpadding="8" cellspacing="0">
+            <thead>
+              <tr><th>Sala</th><th>Progresso</th><th>Completa</th><th>Entrega</th><th>Ação</th></tr>
+            </thead>
+            <tbody>${rows}</tbody>
+          </table>
+          <script>
+            async function deliverMission(id) {
+              const saved = localStorage.getItem('adminToken') || '';
+              const token = saved || prompt('Token admin');
+              if (!token) return;
+              localStorage.setItem('adminToken', token);
+              const res = await fetch('/admin/missions/' + id + '/deliver', {
+                method: 'POST',
+                headers: { 'x-admin-token': token }
+              });
+              if (res.ok) location.reload();
+              else alert('Falha ao marcar entrega');
+            }
+          </script>
+        </body>
+      </html>
+    `);
+  } catch (err) {
+    console.error('[GET /admin/missions/today]', err.message);
+    res.status(500).send('Erro no banco de dados');
+  }
+});
+
+app.post('/admin/missions/:id/deliver', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isInteger(id)) return res.status(400).json({ error: 'id inválido' });
+  try {
+    const result = await pool.query(
+      `UPDATE missions
+          SET delivered = true
+        WHERE id = $1
+        RETURNING *`,
+      [id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Missão não encontrada' });
+    res.json(toMissionDto(result.rows[0]));
+  } catch (err) {
+    console.error('[POST /admin/missions/:id/deliver]', err.message);
     res.status(500).json({ error: 'Erro no banco de dados' });
   }
 });
@@ -546,6 +724,22 @@ async function initDb() {
     ALTER TABLE player_scores ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE comments ADD COLUMN IF NOT EXISTS author_name VARCHAR(100);
     ALTER TABLE comments ADD COLUMN IF NOT EXISTS author_sala VARCHAR(20);
+
+    CREATE TABLE IF NOT EXISTS missions (
+      id           SERIAL PRIMARY KEY,
+      date         DATE NOT NULL,
+      sala         VARCHAR(20) NOT NULL,
+      goal_type    VARCHAR(32) NOT NULL,
+      target       INTEGER NOT NULL,
+      reward       VARCHAR(120) NOT NULL,
+      progress     INTEGER NOT NULL DEFAULT 0,
+      completed    BOOLEAN NOT NULL DEFAULT false,
+      completed_at TIMESTAMP,
+      delivered    BOOLEAN NOT NULL DEFAULT false,
+      UNIQUE(date, sala)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_missions_date ON missions(date);
   `);
 
   // Insere perguntas apenas se tabela estiver vazia
@@ -861,5 +1055,9 @@ io.on('connection', socket => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 initDb()
-  .then(() => server.listen(PORT, () => console.log(`⚽ Hexa Challenge API rodando na porta ${PORT}`)))
+  .then(async () => {
+    await ensureTodayMissions();
+    startMissionScheduler();
+    server.listen(PORT, () => console.log(`⚽ Hexa Challenge API rodando na porta ${PORT}`));
+  })
   .catch(err => { console.error('Falha ao iniciar:', err); process.exit(1); });
