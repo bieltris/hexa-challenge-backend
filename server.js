@@ -634,6 +634,10 @@ async function endDuel(duelId, winnerSid, reason) {
         'UPDATE scores SET goals = goals + $1, updated_at = NOW() WHERE sala = $2',
         [pts, winner.sala]
       );
+      await pool.query(
+        'UPDATE scores SET goals = GREATEST(goals - $1, 0), updated_at = NOW() WHERE sala = $2',
+        [pts, loser.sala]
+      );
     } catch(e) { console.error('[duel endDuel]', e.message); }
   }
 
