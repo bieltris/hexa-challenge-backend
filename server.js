@@ -4,8 +4,12 @@ const http    = require('http');
 const express = require('express');
 const cors    = require('cors');
 const { Server } = require('socket.io');
+const path    = require('path');
+const multer  = require('multer');
+const { nanoid } = require('nanoid');
 const pool = require('./db');
 const { rankOf } = require('./ranks');
+const r2 = require('./r2');
 const {
   SALAS,
   ensureTodayMissions,
@@ -576,10 +580,13 @@ app.get('/api/comments', async (req, res) => {
     const result = await pool.query(
       `SELECT c.id, c.sala, c.body, c.player_name, c.player_photo, c.is_pele,
               c.created_at, c.likes, c.author_name, c.author_sala,
+              c.audio_url, c.audio_dur_ms,
               COALESCE(p.goals, 0) AS author_goals
          FROM comments c
          LEFT JOIN player_scores p
            ON p.name = c.author_name AND p.sala = c.author_sala
+        WHERE c.moderation IN ('approved', 'pending')
+          AND c.report_count < 3
         ORDER BY c.created_at DESC
         LIMIT 200`
     );
@@ -593,6 +600,204 @@ app.get('/api/comments', async (req, res) => {
     console.error('[GET /api/comments]', err.message);
     res.status(500).json({ error: 'Erro no banco de dados' });
   }
+});
+
+// ── POST /api/comments/audio ─────────────────────────────────────────────────
+// multipart/form-data: campo "audio" (file), fields "sala" e "name"
+// header "x-audio-duration-ms" obrigatório (500-5500)
+const audioUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 250_000 }, // 250 KB max
+  fileFilter: (req, file, cb) => {
+    const allowed = ['audio/mp4', 'audio/m4a', 'audio/aac', 'audio/webm', 'audio/mpeg', 'audio/x-m4a'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error(`mimetype não suportado: ${file.mimetype}`));
+  },
+});
+
+app.post('/api/comments/audio', (req, res) => {
+  audioUpload.single('audio')(req, res, async (err) => {
+    if (err) {
+      console.error('[POST /api/comments/audio] upload err:', err.message);
+      return res.status(400).json({ error: err.message });
+    }
+    if (!r2.enabled) {
+      return res.status(503).json({ error: 'R2 não configurado no servidor' });
+    }
+    if (!req.file) return res.status(400).json({ error: 'Arquivo audio ausente' });
+
+    const sala = (req.body.sala || '').toString().trim();
+    const name = (req.body.name || '').toString().trim().slice(0, 100);
+    const durMs = parseInt(req.headers['x-audio-duration-ms'] || '0', 10);
+    const VALID = ['6ano','7ano','8ano','9ano','1medio','2medio','3medio'];
+
+    if (!VALID.includes(sala)) return res.status(400).json({ error: 'Sala inválida' });
+    if (!name) return res.status(400).json({ error: 'Nome obrigatório' });
+    if (durMs < 500 || durMs > 5500) {
+      return res.status(400).json({ error: 'Duração inválida (500-5500 ms)' });
+    }
+
+    try {
+      const id = nanoid(12);
+      const { url } = await r2.uploadAudio(req.file.buffer, id, req.file.mimetype);
+      if (!url) {
+        return res.status(503).json({ error: 'R2_PUBLIC_BASE não configurado' });
+      }
+
+      const player = PLAYERS[Math.floor(Math.random() * PLAYERS.length)];
+      const result = await pool.query(
+        `INSERT INTO comments(sala, body, player_name, player_photo, is_pele,
+                              author_name, author_sala, audio_url, audio_dur_ms, moderation)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'approved') RETURNING *`,
+        [sala, '', player.name, player.photo, player.is_pele, name, sala, url, durMs]
+      );
+      let comment = result.rows[0];
+
+      const ps = await pool.query(
+        `SELECT goals FROM player_scores WHERE name = $1 AND sala = $2`,
+        [name, sala]
+      );
+      const goals = ps.rows[0]?.goals ?? 0;
+      const rank = rankOf(goals);
+      comment = { ...comment, author_goals: goals, author_rank_label: rank.label, author_rank_color: rank.color };
+
+      io.emit('new_comment', comment);
+      res.status(201).json(comment);
+    } catch (e) {
+      console.error('[POST /api/comments/audio]', e.message);
+      res.status(500).json({ error: 'Erro ao processar áudio' });
+    }
+  });
+});
+
+// ── POST /api/comments/:id/report ─────────────────────────────────────────────
+app.post('/api/comments/:id/report', async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!Number.isFinite(id)) return res.status(400).json({ error: 'id inválido' });
+  try {
+    const result = await pool.query(
+      `UPDATE comments
+          SET report_count = report_count + 1,
+              moderation = CASE WHEN report_count + 1 >= 3 THEN 'rejected' ELSE moderation END
+        WHERE id = $1
+        RETURNING id, report_count, moderation`,
+      [id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'não encontrado' });
+
+    await pool.query(
+      `INSERT INTO audit_log(comment_id, action, actor)
+       VALUES($1, $2, $3)`,
+      [id, 'report', (req.ip || 'unknown').slice(0, 80)]
+    );
+
+    if (result.rows[0].moderation === 'rejected') {
+      io.emit('comment_removed', { id });
+    }
+    res.json(result.rows[0]);
+  } catch (e) {
+    console.error('[POST /api/comments/:id/report]', e.message);
+    res.status(500).json({ error: 'Erro no banco' });
+  }
+});
+
+// ── Admin: queue de moderação ─────────────────────────────────────────────────
+function requireAdmin(req, res, next) {
+  const token = req.headers['x-admin-token'];
+  if (!process.env.ADMIN_TOKEN || token !== process.env.ADMIN_TOKEN) {
+    return res.status(401).json({ error: 'admin only' });
+  }
+  next();
+}
+
+app.get('/admin/queue', requireAdmin, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `SELECT id, sala, body, audio_url, audio_dur_ms, author_name, author_sala,
+              moderation, report_count, created_at
+         FROM comments
+        WHERE moderation = 'pending' OR report_count > 0
+        ORDER BY report_count DESC, created_at DESC
+        LIMIT 100`
+    );
+    const html = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Cartolina admin queue</title>
+<style>
+  body{font-family:system-ui;background:#0b0f1a;color:#eee;padding:20px;max-width:900px;margin:auto}
+  .item{border:1px solid #333;border-radius:8px;padding:12px;margin-bottom:12px;background:#141a2b}
+  .meta{color:#888;font-size:12px}
+  .badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold}
+  .badge.rep{background:#dc2626}
+  .badge.mod{background:#f59e0b;color:#000}
+  audio{width:100%;margin:8px 0}
+  button{background:#22c55e;border:0;color:#000;padding:6px 14px;border-radius:6px;cursor:pointer;font-weight:bold;margin-right:6px}
+  button.reject{background:#dc2626;color:#fff}
+  .body{margin:8px 0;color:#ddd}
+</style></head><body>
+<h1>Fila de moderação (${r.rows.length})</h1>
+${r.rows.map(c => `
+  <div class="item" id="c${c.id}">
+    <div class="meta">
+      #${c.id} · ${c.author_name || '(sem autor)'} · ${c.sala} · ${new Date(c.created_at).toLocaleString('pt-BR')}
+      <span class="badge mod">${c.moderation}</span>
+      ${c.report_count > 0 ? `<span class="badge rep">${c.report_count} report(s)</span>` : ''}
+    </div>
+    ${c.audio_url ? `<audio controls preload="metadata" src="${c.audio_url}"></audio>` : ''}
+    ${c.body ? `<div class="body">${escapeHtml(c.body)}</div>` : ''}
+    <button onclick="act(${c.id},'approve')">Aprovar</button>
+    <button class="reject" onclick="act(${c.id},'reject')">Rejeitar</button>
+  </div>
+`).join('')}
+<script>
+const TOKEN = prompt('Admin token:');
+async function act(id, action){
+  const res = await fetch('/admin/comments/'+id+'/'+action, {
+    method:'POST', headers:{'x-admin-token': TOKEN}
+  });
+  if(res.ok) document.getElementById('c'+id).style.display='none';
+  else alert('falhou: '+res.status);
+}
+function escapeHtml(s){return s.replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c])}
+</script>
+</body></html>`;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (e) {
+    console.error('[GET /admin/queue]', e.message);
+    res.status(500).json({ error: 'erro' });
+  }
+});
+
+// Helper escape (server-side, usado pelo HTML acima)
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+app.post('/admin/comments/:id/approve', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  await pool.query(
+    `UPDATE comments SET moderation = 'approved', report_count = 0 WHERE id = $1`,
+    [id]
+  );
+  await pool.query(
+    `INSERT INTO audit_log(comment_id, action, actor) VALUES($1,'approve','admin')`, [id]
+  );
+  res.json({ ok: true });
+});
+
+app.post('/admin/comments/:id/reject', requireAdmin, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  await pool.query(
+    `UPDATE comments SET moderation = 'rejected' WHERE id = $1`,
+    [id]
+  );
+  await pool.query(
+    `INSERT INTO audit_log(comment_id, action, actor) VALUES($1,'reject','admin')`, [id]
+  );
+  io.emit('comment_removed', { id });
+  res.json({ ok: true });
 });
 
 // ── GET /api/comments/top-rooms ──────────────────────────────────────────────
@@ -852,6 +1057,24 @@ async function initDb() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_missions_date ON missions(date);
+
+    -- Plano 3: áudio em comentários
+    ALTER TABLE comments ADD COLUMN IF NOT EXISTS audio_url    TEXT;
+    ALTER TABLE comments ADD COLUMN IF NOT EXISTS audio_dur_ms INTEGER;
+    ALTER TABLE comments ADD COLUMN IF NOT EXISTS moderation   VARCHAR(16) NOT NULL DEFAULT 'approved';
+    ALTER TABLE comments ADD COLUMN IF NOT EXISTS report_count INTEGER NOT NULL DEFAULT 0;
+
+    CREATE INDEX IF NOT EXISTS idx_comments_moderation ON comments(moderation, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id          SERIAL PRIMARY KEY,
+      comment_id  INTEGER REFERENCES comments(id) ON DELETE CASCADE,
+      action      VARCHAR(32) NOT NULL,
+      actor       VARCHAR(80),
+      at          TIMESTAMP DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_log_comment ON audit_log(comment_id);
   `);
 
   // Insere perguntas apenas se tabela estiver vazia
