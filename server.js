@@ -499,6 +499,298 @@ async function initDb() {
   console.log('✅ Banco inicializado');
 }
 
+// ── DUEL SYSTEM ───────────────────────────────────────────────────────────────
+
+const onlineUsers      = new Map(); // socketId → {name, sala, status, duelId}
+const duelRooms        = new Map(); // duelId   → room object
+const matchQueue       = [];        // [{socketId, sala}]
+const disconnectedDuelMap = new Map(); // 'name:sala' → {duelId, timer}
+
+function genId() { return Math.random().toString(36).slice(2, 9); }
+
+function broadcastOnlineUsers() {
+  const list = [...onlineUsers.values()].map(u => ({
+    socketId: u.socketId, name: u.name, sala: u.sala, status: u.status,
+  }));
+  io.emit('duel_online_users', list);
+}
+
+function startDuel(sid1, sid2, duelId = genId()) {
+  const u1 = onlineUsers.get(sid1);
+  const u2 = onlineUsers.get(sid2);
+  if (!u1 || !u2) return;
+  u1.status = 'in_duel'; u1.duelId = duelId;
+  u2.status = 'in_duel'; u2.duelId = duelId;
+
+  const room = {
+    id: duelId,
+    players: {
+      [sid1]: { socketId: sid1, name: u1.name, sala: u1.sala, consecutive: 0 },
+      [sid2]: { socketId: sid2, name: u2.name, sala: u2.sala, consecutive: 0 },
+    },
+    round: 1,
+    kickerSid: sid1,
+    choices: {},
+    status: 'waiting',
+    timer: null,
+    disconnectTimers: {},
+  };
+  duelRooms.set(duelId, room);
+
+  const sameSala = u1.sala === u2.sala;
+  [sid1, sid2].forEach(sid => {
+    const oppSid = sid === sid1 ? sid2 : sid1;
+    const opp    = onlineUsers.get(oppSid);
+    io.to(sid).emit('duel_start', {
+      duelId, sameSala,
+      opponent: { socketId: oppSid, name: opp.name, sala: opp.sala },
+      kickerSid: sid1,
+      round: 1,
+    });
+  });
+
+  broadcastOnlineUsers();
+  setTimeout(() => beginRound(duelId), 1000);
+}
+
+function beginRound(duelId) {
+  const room = duelRooms.get(duelId);
+  if (!room || room.status === 'ended') return;
+  room.status  = 'waiting';
+  room.choices = {};
+  const pids   = Object.keys(room.players);
+
+  pids.forEach(sid => {
+    io.to(sid).emit('duel_round_start', {
+      duelId,
+      round:     room.round,
+      kickerSid: room.kickerSid,
+      consecutive: Object.fromEntries(pids.map(p => [p, room.players[p].consecutive])),
+    });
+  });
+
+  room.timer = setTimeout(() => {
+    pids.forEach(sid => {
+      if (!room.choices[sid]) room.choices[sid] = Math.random() < 0.5 ? 'L' : 'R';
+    });
+    resolveRound(duelId);
+  }, 5000);
+}
+
+function resolveRound(duelId) {
+  const room = duelRooms.get(duelId);
+  if (!room || room.status === 'ended') return;
+  clearTimeout(room.timer); room.timer = null;
+
+  const pids      = Object.keys(room.players);
+  const keeperSid = pids.find(s => s !== room.kickerSid);
+  const kChoice   = room.choices[room.kickerSid] || (Math.random() < 0.5 ? 'L' : 'R');
+  const keepChoice= room.choices[keeperSid]       || (Math.random() < 0.5 ? 'L' : 'R');
+  const scored    = kChoice !== keepChoice;
+
+  const winnerId  = scored ? room.kickerSid : keeperSid;
+  const loserId   = scored ? keeperSid      : room.kickerSid;
+
+  room.players[winnerId].consecutive++;
+  room.players[loserId].consecutive  = 0;
+
+  const consecutive = Object.fromEntries(pids.map(p => [p, room.players[p].consecutive]));
+
+  pids.forEach(sid => {
+    io.to(sid).emit('duel_round_result', {
+      duelId, round: room.round,
+      kickerSid: room.kickerSid, keeperSid,
+      kickerChoice: kChoice, keeperChoice: keepChoice,
+      scored, winnerId, consecutive,
+    });
+  });
+
+  if (room.players[winnerId].consecutive >= 2) {
+    setTimeout(() => endDuel(duelId, winnerId, 'consecutive'), 2200);
+    return;
+  }
+
+  room.round++;
+  room.kickerSid = keeperSid; // alternate
+  setTimeout(() => beginRound(duelId), 2500);
+}
+
+async function endDuel(duelId, winnerSid, reason) {
+  const room = duelRooms.get(duelId);
+  if (!room || room.status === 'ended') return;
+  room.status = 'ended';
+  clearTimeout(room.timer);
+  Object.values(room.disconnectTimers).forEach(t => clearTimeout(t));
+
+  const pids   = Object.keys(room.players);
+  const winner = room.players[winnerSid];
+  const loser  = room.players[pids.find(p => p !== winnerSid)];
+  const diffSala = winner.sala !== loser.sala;
+  const pts    = diffSala ? 10 : 0;
+
+  if (diffSala) {
+    try {
+      await pool.query(
+        'UPDATE scores SET goals = goals + $1, updated_at = NOW() WHERE sala = $2',
+        [pts, winner.sala]
+      );
+    } catch(e) { console.error('[duel endDuel]', e.message); }
+  }
+
+  pids.forEach(sid => {
+    io.to(sid).emit('duel_end', {
+      duelId, winnerSid, reason, diffSala, pts,
+      winner: { name: winner.name, sala: winner.sala },
+      loser:  { name: loser.name,  sala: loser.sala  },
+    });
+    const u = onlineUsers.get(sid);
+    if (u) { u.status = 'idle'; u.duelId = null; }
+  });
+
+  broadcastOnlineUsers();
+  setTimeout(() => duelRooms.delete(duelId), 60000);
+}
+
+io.on('connection', socket => {
+  socket.on('user_join', ({ name, sala }) => {
+    if (!name || !sala) return;
+    const key = `${name.trim().toLowerCase()}:${sala}`;
+
+    // Reconnection to active duel?
+    const pending = disconnectedDuelMap.get(key);
+    if (pending) {
+      clearTimeout(pending.timer);
+      disconnectedDuelMap.delete(key);
+      const room = duelRooms.get(pending.duelId);
+      if (room && room.status !== 'ended') {
+        // Re-register socket
+        onlineUsers.set(socket.id, { socketId: socket.id, name: name.trim(), sala, status: 'in_duel', duelId: pending.duelId });
+        // Update player socketId in room
+        const oldSid = pending.oldSid;
+        if (room.players[oldSid]) {
+          room.players[socket.id] = { ...room.players[oldSid], socketId: socket.id };
+          delete room.players[oldSid];
+          if (room.kickerSid === oldSid) room.kickerSid = socket.id;
+          Object.keys(room.choices).forEach(k => {
+            if (k === oldSid) { room.choices[socket.id] = room.choices[k]; delete room.choices[k]; }
+          });
+        }
+        // Notify opponent
+        const oppSid = Object.keys(room.players).find(s => s !== socket.id);
+        if (oppSid) io.to(oppSid).emit('duel_opponent_reconnected', { duelId: pending.duelId });
+        socket.emit('duel_reconnected', { duelId: pending.duelId, room: {
+          kickerSid: room.kickerSid, round: room.round,
+          consecutive: Object.fromEntries(Object.entries(room.players).map(([s,p])=>[s,p.consecutive])),
+        }});
+        return;
+      }
+    }
+
+    onlineUsers.set(socket.id, { socketId: socket.id, name: name.trim(), sala, status: 'idle', duelId: null });
+    broadcastOnlineUsers();
+  });
+
+  socket.on('duel_search_users', ({ query = '' }) => {
+    const q  = query.trim().toLowerCase();
+    const results = [...onlineUsers.values()]
+      .filter(u => u.socketId !== socket.id && u.status === 'idle' &&
+                   (q === '' || u.name.toLowerCase().includes(q)))
+      .map(u => ({ socketId: u.socketId, name: u.name, sala: u.sala }));
+    socket.emit('duel_search_results', results);
+  });
+
+  socket.on('duel_invite', ({ targetSocketId }) => {
+    const from = onlineUsers.get(socket.id);
+    const to   = onlineUsers.get(targetSocketId);
+    if (!from || !to || to.status !== 'idle') return;
+    const duelId = genId();
+    io.to(targetSocketId).emit('duel_invite_received', {
+      duelId,
+      from: { socketId: socket.id, name: from.name, sala: from.sala },
+    });
+    // Store pending (30s expiry handled implicitly by invite_response)
+  });
+
+  socket.on('duel_invite_response', ({ duelId, fromSocketId, accepted }) => {
+    const from = onlineUsers.get(fromSocketId);
+    if (!accepted) {
+      io.to(fromSocketId).emit('duel_invite_declined', { duelId });
+      return;
+    }
+    if (!from || from.status !== 'idle') {
+      socket.emit('duel_invite_declined', { duelId });
+      return;
+    }
+    startDuel(fromSocketId, socket.id, duelId);
+  });
+
+  socket.on('duel_queue_join', () => {
+    const me = onlineUsers.get(socket.id);
+    if (!me || me.status !== 'idle') return;
+    // Find cross-sala opponent
+    const idx = matchQueue.findIndex(q => q.sala !== me.sala);
+    if (idx !== -1) {
+      const opp = matchQueue.splice(idx, 1)[0];
+      const oppUser = onlineUsers.get(opp.socketId);
+      if (oppUser) oppUser.status = 'idle';
+      startDuel(socket.id, opp.socketId);
+    } else {
+      me.status = 'queued';
+      matchQueue.push({ socketId: socket.id, sala: me.sala });
+      socket.emit('duel_queued');
+      broadcastOnlineUsers();
+    }
+  });
+
+  socket.on('duel_queue_leave', () => {
+    const idx = matchQueue.findIndex(q => q.socketId === socket.id);
+    if (idx !== -1) matchQueue.splice(idx, 1);
+    const me = onlineUsers.get(socket.id);
+    if (me) me.status = 'idle';
+    socket.emit('duel_queue_left');
+    broadcastOnlineUsers();
+  });
+
+  socket.on('duel_choice', ({ duelId, choice }) => {
+    const room = duelRooms.get(duelId);
+    if (!room || room.status !== 'waiting' || !room.players[socket.id]) return;
+    if (!['L','R'].includes(choice)) return;
+    room.choices[socket.id] = choice;
+    // Notify self (choice locked)
+    socket.emit('duel_choice_locked', { choice });
+    // Both chose?
+    if (Object.keys(room.players).every(p => room.choices[p])) resolveRound(duelId);
+  });
+
+  socket.on('disconnect', () => {
+    const me = onlineUsers.get(socket.id);
+    if (!me) return;
+
+    // Remove from queue
+    const qi = matchQueue.findIndex(q => q.socketId === socket.id);
+    if (qi !== -1) matchQueue.splice(qi, 1);
+
+    if (me.duelId) {
+      const room = duelRooms.get(me.duelId);
+      if (room && room.status !== 'ended') {
+        const key   = `${me.name.trim().toLowerCase()}:${me.sala}`;
+        const oppSid = Object.keys(room.players).find(s => s !== socket.id);
+        if (oppSid) io.to(oppSid).emit('duel_opponent_disconnected', { duelId: me.duelId, waitMs: 5000 });
+
+        const timer = setTimeout(() => {
+          disconnectedDuelMap.delete(key);
+          if (oppSid) endDuel(me.duelId, oppSid, 'disconnect');
+        }, 5000);
+
+        disconnectedDuelMap.set(key, { duelId: me.duelId, oldSid: socket.id, timer });
+      }
+    }
+
+    onlineUsers.delete(socket.id);
+    broadcastOnlineUsers();
+  });
+});
+
 // ── Start ─────────────────────────────────────────────────────────────────────
 initDb()
   .then(() => server.listen(PORT, () => console.log(`⚽ Hexa Challenge API rodando na porta ${PORT}`)))
