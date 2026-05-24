@@ -5,6 +5,7 @@ const express = require('express');
 const cors    = require('cors');
 const { Server } = require('socket.io');
 const pool = require('./db');
+const { rankOf } = require('./ranks');
 
 const app    = express();
 const server = http.createServer(app);
@@ -198,16 +199,19 @@ app.post('/api/shoot', async (req, res) => {
       return res.status(404).json({ error: 'Sala não encontrada' });
     }
 
-    // Registra pontuação individual se nome fornecido e gol marcado
-    if (scored && name && typeof name === 'string') {
+    // Registra pontuação individual se nome fornecido. Conta attempt sempre.
+    if (name && typeof name === 'string') {
       const cleanName = name.trim().slice(0, 100);
       if (cleanName.length > 0) {
+        const goalInc = scored ? 1 : 0;
         await pool.query(
-          `INSERT INTO player_scores(name, sala, goals)
-           VALUES($1, $2, 1)
+          `INSERT INTO player_scores(name, sala, goals, attempts)
+           VALUES($1, $2, $3, 1)
            ON CONFLICT(name, sala)
-           DO UPDATE SET goals = player_scores.goals + 1, updated_at = NOW()`,
-          [cleanName, sala]
+           DO UPDATE SET goals = player_scores.goals + $3,
+                         attempts = player_scores.attempts + 1,
+                         updated_at = NOW()`,
+          [cleanName, sala, goalInc]
         );
       }
     }
@@ -239,7 +243,7 @@ app.get('/api/questions/random', async (req, res) => {
 // ── POST /api/comments ────────────────────────────────────────────────────────
 // Body: { sala, body }
 app.post('/api/comments', async (req, res) => {
-  const { sala, body } = req.body;
+  const { sala, body, name } = req.body;
   const VALID_SALAS = ['6ano','7ano','8ano','9ano','1medio','2medio','3medio'];
   if (!sala || !body || typeof body !== 'string' || body.trim().length < 2) {
     return res.status(400).json({ error: 'Campos obrigatórios: sala, body (mín 2 chars)' });
@@ -248,13 +252,26 @@ app.post('/api/comments', async (req, res) => {
     return res.status(400).json({ error: 'Sala inválida' });
   }
   const player = PLAYERS[Math.floor(Math.random() * PLAYERS.length)];
+  const authorName = (typeof name === 'string') ? name.trim().slice(0, 100) || null : null;
   try {
     const result = await pool.query(
-      `INSERT INTO comments(sala, body, player_name, player_photo, is_pele)
-       VALUES($1,$2,$3,$4,$5) RETURNING *`,
-      [sala, body.trim().slice(0, 500), player.name, player.photo, player.is_pele]
+      `INSERT INTO comments(sala, body, player_name, player_photo, is_pele, author_name, author_sala)
+       VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
+      [sala, body.trim().slice(0, 500), player.name, player.photo, player.is_pele, authorName, sala]
     );
-    const comment = result.rows[0];
+    let comment = result.rows[0];
+
+    // Anexa cargo do autor se identificado
+    if (comment.author_name) {
+      const ps = await pool.query(
+        `SELECT goals FROM player_scores WHERE name = $1 AND sala = $2`,
+        [comment.author_name, comment.author_sala]
+      );
+      const goals = ps.rows[0]?.goals ?? 0;
+      const rank = rankOf(goals);
+      comment = { ...comment, author_goals: goals, author_rank_label: rank.label, author_rank_color: rank.color };
+    }
+
     io.emit('new_comment', comment);
     res.status(201).json(comment);
   } catch (err) {
@@ -267,12 +284,21 @@ app.post('/api/comments', async (req, res) => {
 app.get('/api/comments', async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, sala, body, player_name, player_photo, is_pele, created_at, likes
-         FROM comments
-        ORDER BY created_at DESC
+      `SELECT c.id, c.sala, c.body, c.player_name, c.player_photo, c.is_pele,
+              c.created_at, c.likes, c.author_name, c.author_sala,
+              COALESCE(p.goals, 0) AS author_goals
+         FROM comments c
+         LEFT JOIN player_scores p
+           ON p.name = c.author_name AND p.sala = c.author_sala
+        ORDER BY c.created_at DESC
         LIMIT 200`
     );
-    res.json(result.rows);
+    const rows = result.rows.map(r => {
+      if (!r.author_name) return r;
+      const rank = rankOf(r.author_goals);
+      return { ...r, author_rank_label: rank.label, author_rank_color: rank.color };
+    });
+    res.json(rows);
   } catch (err) {
     console.error('[GET /api/comments]', err.message);
     res.status(500).json({ error: 'Erro no banco de dados' });
@@ -398,6 +424,34 @@ app.post('/api/award', async (req, res) => {
   }
 });
 
+// ── GET /api/players/me ───────────────────────────────────────────────────────
+// Query: ?name=Fulano&sala=6ano  → { goals, attempts, rank }
+app.get('/api/players/me', async (req, res) => {
+  const name = (req.query.name || '').toString().trim().slice(0, 100);
+  const sala = (req.query.sala || '').toString().trim();
+  const VALID = ['6ano','7ano','8ano','9ano','1medio','2medio','3medio'];
+  if (!name || !VALID.includes(sala)) {
+    return res.status(400).json({ error: 'Parâmetros: name (string), sala (válida)' });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT goals, attempts FROM player_scores WHERE name = $1 AND sala = $2`,
+      [name, sala]
+    );
+    const row = result.rows[0] || { goals: 0, attempts: 0 };
+    res.json({
+      name,
+      sala,
+      goals: row.goals,
+      attempts: row.attempts,
+      rank: rankOf(row.goals),
+    });
+  } catch (err) {
+    console.error('[GET /api/players/me]', err.message);
+    res.status(500).json({ error: 'Erro no banco' });
+  }
+});
+
 // ── GET /api/players/scores ───────────────────────────────────────────────────
 app.get('/api/players/scores', async (req, res) => {
   try {
@@ -468,9 +522,13 @@ async function initDb() {
       name       VARCHAR(100) NOT NULL,
       sala       VARCHAR(20)  NOT NULL,
       goals      INTEGER      NOT NULL DEFAULT 0,
+      attempts   INTEGER      NOT NULL DEFAULT 0,
       updated_at TIMESTAMP    NOT NULL DEFAULT NOW(),
       UNIQUE(name, sala)
     );
+
+    CREATE INDEX IF NOT EXISTS idx_player_scores_sala_goals
+      ON player_scores(sala, goals DESC);
 
     CREATE TABLE IF NOT EXISTS comments (
       id           SERIAL PRIMARY KEY,
@@ -480,8 +538,14 @@ async function initDb() {
       player_photo VARCHAR(500) NOT NULL,
       is_pele      BOOLEAN      NOT NULL DEFAULT FALSE,
       created_at   TIMESTAMP    NOT NULL DEFAULT NOW(),
-      likes        INTEGER      NOT NULL DEFAULT 0
+      likes        INTEGER      NOT NULL DEFAULT 0,
+      author_name  VARCHAR(100),
+      author_sala  VARCHAR(20)
     );
+
+    ALTER TABLE player_scores ADD COLUMN IF NOT EXISTS attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE comments ADD COLUMN IF NOT EXISTS author_name VARCHAR(100);
+    ALTER TABLE comments ADD COLUMN IF NOT EXISTS author_sala VARCHAR(20);
   `);
 
   // Insere perguntas apenas se tabela estiver vazia
