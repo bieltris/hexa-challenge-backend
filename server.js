@@ -718,11 +718,11 @@ io.on('connection', socket => {
   socket.on('duel_invite_response', ({ duelId, fromSocketId, accepted }) => {
     const from = onlineUsers.get(fromSocketId);
     if (!accepted) {
-      io.to(fromSocketId).emit('duel_invite_declined', { duelId });
+      io.to(fromSocketId).emit('duel_invite_declined', { duelId, declinedBy: socket.id });
       return;
     }
     if (!from || from.status !== 'idle') {
-      socket.emit('duel_invite_declined', { duelId });
+      socket.emit('duel_invite_declined', { duelId, declinedBy: socket.id });
       return;
     }
     startDuel(fromSocketId, socket.id, duelId);
