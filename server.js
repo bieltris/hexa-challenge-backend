@@ -31,6 +31,14 @@ const SALA_NAMES = {
   '2medio': '2º Médio',
   '3medio': '3º Médio',
 };
+const MAP_REGION_IDS = [
+  'south_america',
+  'europe',
+  'asia',
+  'north_america',
+  'africa',
+  'oceania',
+];
 
 function toMissionDto(row) {
   return {
@@ -63,6 +71,94 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+function salaName(sala) {
+  return SALA_NAMES[sala] || sala;
+}
+
+function buildMapRegions(rows) {
+  const totalGoals = rows.reduce((sum, row) => sum + row.goals, 0);
+
+  if (totalGoals <= 0) {
+    return {
+      totalGoals: 0,
+      regions: Object.fromEntries(
+        MAP_REGION_IDS.map((id) => [
+          id,
+          {
+            sala: null,
+            salaName: 'Ninguém conquistou ainda',
+            percent: 0,
+            goals: 0,
+          },
+        ])
+      ),
+    };
+  }
+
+  const seats = MAP_REGION_IDS.length;
+  const quotas = rows.map((row) => {
+    const exact = (row.goals / totalGoals) * seats;
+    const floor = Math.floor(exact);
+    return {
+      sala: row.sala,
+      salaName: salaName(row.sala),
+      goals: row.goals,
+      exact,
+      floor,
+      frac: exact - floor,
+    };
+  });
+
+  let assigned = quotas.reduce((sum, item) => sum + item.floor, 0);
+  const remaining = seats - assigned;
+  quotas
+    .slice()
+    .sort((a, b) => {
+      const byFrac = b.frac - a.frac;
+      if (byFrac !== 0) return byFrac;
+      const byGoals = b.goals - a.goals;
+      if (byGoals !== 0) return byGoals;
+      return a.sala.localeCompare(b.sala);
+    })
+    .slice(0, remaining)
+    .forEach((item) => {
+      item.floor += 1;
+      assigned += 1;
+    });
+
+  const slots = [];
+  quotas
+    .slice()
+    .sort((a, b) => {
+      const byGoals = b.goals - a.goals;
+      if (byGoals !== 0) return byGoals;
+      return a.sala.localeCompare(b.sala);
+    })
+    .forEach((item) => {
+      for (let i = 0; i < item.floor; i++) {
+        slots.push({
+          sala: item.sala,
+          salaName: item.salaName,
+          goals: item.goals,
+          percent: Math.round((item.goals / totalGoals) * 100),
+        });
+      }
+    });
+
+  const regions = {};
+  MAP_REGION_IDS.forEach((regionId, index) => {
+    const slot = slots[index] || null;
+    regions[regionId] = slot || {
+      sala: null,
+      salaName: 'Ninguém conquistou ainda',
+      percent: 0,
+      goals: 0,
+    };
+  });
+
+  return { totalGoals, regions };
 }
 
 // ── Jogadores ─────────────────────────────────────────────────────────────────
@@ -216,6 +312,22 @@ app.get('/api/scores', async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error('[GET /api/scores]', err.message);
+    res.status(500).json({ error: 'Erro no banco de dados' });
+  }
+});
+
+// ── GET /api/map/regions ─────────────────────────────────────────────────────
+app.get('/api/map/regions', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT sala, goals
+         FROM scores
+        ORDER BY goals DESC, sala ASC`
+    );
+    const snapshot = buildMapRegions(result.rows);
+    res.json(snapshot);
+  } catch (err) {
+    console.error('[GET /api/map/regions]', err.message);
     res.status(500).json({ error: 'Erro no banco de dados' });
   }
 });
