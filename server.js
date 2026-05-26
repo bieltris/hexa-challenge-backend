@@ -339,6 +339,76 @@ app.get('/api/map/regions', async (req, res) => {
   }
 });
 
+// ── Rate limit por (name+sala) para endpoints de gol ─────────────────────────
+// In-memory (reseta em restart do Render). Estado por user:
+//   { lastAt, recent: [timestamps], dayGoals, dayStart }
+const userActivity = new Map();
+
+function rateCheckUser(name, sala, opts = {}) {
+  const {
+    minInterval = 0,      // ms mínimos entre requests
+    perMinute = 0,        // requests/min máximos (anti-DDoS)
+    goalsPerMinute = 0,   // gols/min máximos (anti-farming real)
+    dayMaxGoals = 0,      // cap diário de gols
+    addGoals = 0,         // gols que esse request vai somar (se passar)
+  } = opts;
+
+  if (!name || !sala) return { ok: true };
+  const key = `${String(name).trim().toLowerCase()}:${sala}`;
+  const now = Date.now();
+  let st = userActivity.get(key);
+  if (!st) {
+    st = { lastAt: 0, recent: [], recentGoals: [], dayGoals: 0, dayStart: now };
+    userActivity.set(key, st);
+  }
+
+  // Reset diário 24h
+  if (now - st.dayStart > 86_400_000) { st.dayStart = now; st.dayGoals = 0; }
+
+  // Intervalo mínimo entre requests
+  if (minInterval && now - st.lastAt < minInterval) {
+    return { ok: false, reason: 'too_fast', waitMs: minInterval - (now - st.lastAt) };
+  }
+
+  // Janela móvel de 60s para requests
+  st.recent = st.recent.filter(t => now - t < 60_000);
+  if (perMinute && st.recent.length >= perMinute) {
+    return { ok: false, reason: 'per_minute', waitMs: 60_000 - (now - st.recent[0]) };
+  }
+
+  // Janela móvel de 60s para GOLS (cobre o caso de 1 request = N gols)
+  st.recentGoals = st.recentGoals.filter(e => now - e.at < 60_000);
+  if (goalsPerMinute && addGoals > 0) {
+    const sumLastMin = st.recentGoals.reduce((s, e) => s + e.g, 0);
+    if (sumLastMin + addGoals > goalsPerMinute) {
+      const oldest = st.recentGoals[0]?.at ?? now;
+      return { ok: false, reason: 'goals_per_minute', waitMs: 60_000 - (now - oldest) };
+    }
+  }
+
+  // Cap diário de gols
+  if (dayMaxGoals && addGoals > 0 && st.dayGoals + addGoals > dayMaxGoals) {
+    return { ok: false, reason: 'daily_cap', waitMs: 86_400_000 - (now - st.dayStart) };
+  }
+
+  // Passou tudo — registra
+  st.lastAt = now;
+  st.recent.push(now);
+  if (addGoals > 0) {
+    st.recentGoals.push({ at: now, g: addGoals });
+    st.dayGoals += addGoals;
+  }
+  return { ok: true };
+}
+
+// Limpa entradas inativas a cada 1h
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, st] of userActivity) {
+    if (now - st.lastAt > 3600_000) userActivity.delete(k);
+  }
+}, 3600_000);
+
 // Log de gols/tentativas (fire-and-forget; nao bloqueia resposta).
 // Permite calcular gols/min retroativo e detectar anomalias.
 function logGoalEvent({ name, sala, source, goals = 0, attempts = 0, ip }) {
@@ -367,6 +437,12 @@ app.post('/api/shoot', async (req, res) => {
 
   if (!SALAS.includes(sala)) {
     return res.status(400).json({ error: 'Sala inválida' });
+  }
+
+  // Anti-farming por nome (TinyTask, automação)
+  const rl = rateCheckUser(name, sala, { minInterval: 300, perMinute: 30 });
+  if (!rl.ok) {
+    return res.status(429).json({ error: 'rate_limited', reason: rl.reason, waitMs: rl.waitMs });
   }
 
   try {
@@ -908,6 +984,13 @@ app.post('/api/penalty', async (req, res) => {
   if (!sala || !VALID.includes(sala)) return res.status(400).json({ error: 'sala inválida' });
   const deduct = (typeof points === 'number' && points >= 0) ? Math.min(Math.floor(points), 100) : 2;
   if (deduct === 0) return res.json({ ok: true });
+
+  // Anti-spam: penalty é endpoint que deduz pontos — limita pra evitar sabotagem
+  const rl = rateCheckUser(name, sala, { minInterval: 1000, perMinute: 20 });
+  if (!rl.ok) {
+    return res.status(429).json({ error: 'rate_limited', reason: rl.reason, waitMs: rl.waitMs });
+  }
+
   try {
     await pool.query(
       `UPDATE scores SET goals = GREATEST(0, goals - $1), updated_at = NOW() WHERE sala = $2`,
@@ -943,6 +1026,21 @@ app.post('/api/award', async (req, res) => {
     return res.status(400).json({ error: 'sala e points obrigatórios' });
   }
   const safePoints = Math.min(points, 100);
+
+  // Anti-farming (TinyTask et al):
+  // - 60 requests/min (anti-DDoS)
+  // - 30 GOLS/min real (mesmo que mande 60 reqs, só conta primeiros 30g)
+  // - 500 gols/dia cap longo prazo
+  const rl = rateCheckUser(name, sala, {
+    perMinute: 60,
+    goalsPerMinute: 30,
+    dayMaxGoals: 500,
+    addGoals: safePoints,
+  });
+  if (!rl.ok) {
+    return res.status(429).json({ error: 'rate_limited', reason: rl.reason, waitMs: rl.waitMs });
+  }
+
   try {
     await pool.query(
       `UPDATE scores SET goals = goals + $1, updated_at = NOW() WHERE sala = $2`,
