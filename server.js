@@ -1098,6 +1098,15 @@ const onlineUsers      = new Map(); // socketId → {name, sala, status, duelId}
 const duelRooms        = new Map(); // duelId   → room object
 const matchQueue       = [];        // [{socketId, sala}]
 const disconnectedDuelMap = new Map(); // 'name:sala' → {duelId, timer}
+const lastTauntAt      = new Map(); // socketId → timestamp ms
+
+// Mensagens prontas para o duelo (provocações + comemorações)
+const DUEL_TAUNTS = new Set([
+  'taunt_fire', 'taunt_hurry', 'taunt_sleep', 'taunt_clown',
+  'taunt_read', 'taunt_chicken',
+  'celeb_goal', 'celeb_take', 'celeb_flex', 'celeb_clap',
+  'celeb_gg',   'celeb_fly',
+]);
 
 function genId() { return Math.random().toString(36).slice(2, 9); }
 
@@ -1359,8 +1368,27 @@ io.on('connection', socket => {
     if (Object.keys(room.players).every(p => room.choices[p])) resolveRound(duelId);
   });
 
+  socket.on('duel_taunt', ({ duelId, tauntId }) => {
+    const me = onlineUsers.get(socket.id);
+    if (!me || me.duelId !== duelId) return;
+    if (typeof tauntId !== 'string' || !DUEL_TAUNTS.has(tauntId)) return;
+
+    const now = Date.now();
+    const last = lastTauntAt.get(socket.id) || 0;
+    if (now - last < 1500) return; // rate limit 1.5s
+    lastTauntAt.set(socket.id, now);
+
+    const room = duelRooms.get(duelId);
+    if (!room) return;
+    const oppSid = Object.keys(room.players).find(s => s !== socket.id);
+    if (!oppSid) return;
+
+    io.to(oppSid).emit('duel_taunt_received', { tauntId, fromName: me.name });
+  });
+
   socket.on('disconnect', () => {
     const me = onlineUsers.get(socket.id);
+    lastTauntAt.delete(socket.id);
     if (!me) return;
 
     // Remove from queue
