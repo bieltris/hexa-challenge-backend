@@ -386,9 +386,10 @@ app.post('/api/shoot', async (req, res) => {
       mission = await updateMissionProgress(sala, 1);
       if (mission) {
         const missionPayload = toMissionDto(mission);
-        io.emit('mission_update', missionPayload);
+        // Scope para a sala — só clientes daquela sala recebem
+        io.to(`sala:${sala}`).emit('mission_update', missionPayload);
         if (mission.just_completed) {
-          io.emit('mission_complete', missionPayload);
+          io.to(`sala:${sala}`).emit('mission_complete', missionPayload);
           notifyCompletion(sala).catch((err) => {
             console.error('[notifyCompletion]', err.message);
           });
@@ -1293,7 +1294,15 @@ io.on('connection', socket => {
     }
 
     onlineUsers.set(socket.id, { socketId: socket.id, name: name.trim(), sala, status: 'idle', duelId: null });
+    socket.join(`sala:${sala}`); // subscribe a eventos da sala
     broadcastOnlineUsers();
+  });
+
+  // Subscribe explícito a uma sala (usado pelo socket do home_screen,
+  // que não chama user_join). Permite scoped broadcasts (mission_*, etc.)
+  socket.on('subscribe_sala', ({ sala }) => {
+    if (typeof sala !== 'string' || !sala) return;
+    socket.join(`sala:${sala}`);
   });
 
   socket.on('duel_search_users', ({ query = '' }) => {
