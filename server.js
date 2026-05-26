@@ -1130,11 +1130,37 @@ const DUEL_TAUNTS = new Set([
 
 function genId() { return Math.random().toString(36).slice(2, 9); }
 
-function broadcastOnlineUsers() {
+// Throttle leading+trailing edge a 1Hz para broadcasts de presença.
+// Vários connect/disconnect/status em <1s coalescem em 1 emissão final.
+// Reduz custo de O(N²) por evento → O(N²) por segundo no máximo.
+let _lastOnlineBroadcastAt = 0;
+let _pendingOnlineBroadcast = null;
+
+function _doBroadcastOnlineUsers() {
   const list = [...onlineUsers.values()].map(u => ({
     socketId: u.socketId, name: u.name, sala: u.sala, status: u.status,
   }));
   io.emit('duel_online_users', list);
+  _lastOnlineBroadcastAt = Date.now();
+}
+
+function broadcastOnlineUsers() {
+  const sinceLast = Date.now() - _lastOnlineBroadcastAt;
+  if (sinceLast >= 1000) {
+    // Leading edge — sai agora (responsivo no primeiro evento)
+    if (_pendingOnlineBroadcast) {
+      clearTimeout(_pendingOnlineBroadcast);
+      _pendingOnlineBroadcast = null;
+    }
+    _doBroadcastOnlineUsers();
+  } else if (!_pendingOnlineBroadcast) {
+    // Dentro da janela — agenda trailing edge no fim do segundo
+    _pendingOnlineBroadcast = setTimeout(() => {
+      _pendingOnlineBroadcast = null;
+      _doBroadcastOnlineUsers();
+    }, 1000 - sinceLast);
+  }
+  // Se já tem pendente, ignora — vai sair com estado atual quando timer disparar
 }
 
 function startDuel(sid1, sid2, duelId = genId()) {
@@ -1314,6 +1340,10 @@ io.on('connection', socket => {
 
     onlineUsers.set(socket.id, { socketId: socket.id, name: name.trim(), sala, status: 'idle', duelId: null });
     socket.join(`sala:${sala}`); // subscribe a eventos da sala
+    // Envia lista atual direto pra esse socket (não espera o throttle)
+    socket.emit('duel_online_users', [...onlineUsers.values()].map(u => ({
+      socketId: u.socketId, name: u.name, sala: u.sala, status: u.status,
+    })));
     broadcastOnlineUsers();
   });
 
