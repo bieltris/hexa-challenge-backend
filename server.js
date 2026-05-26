@@ -1172,6 +1172,9 @@ const duelRooms        = new Map(); // duelId   → room object
 const matchQueue       = [];        // [{socketId, sala}]
 const disconnectedDuelMap = new Map(); // 'name:sala' → {duelId, timer}
 const lastTauntAt      = new Map(); // socketId → timestamp ms
+// Anti-spam de convites de duelo.
+// inviteCooldowns[sid] = { lastAnyAt, targets: Map<targetSid, blockedUntil> }
+const inviteCooldowns  = new Map();
 
 // Mensagens prontas para o duelo (provocações + comemorações)
 const DUEL_TAUNTS = new Set([
@@ -1422,6 +1425,23 @@ io.on('connection', socket => {
     const from = onlineUsers.get(socket.id);
     const to   = onlineUsers.get(targetSocketId);
     if (!from || !to || to.status !== 'idle') return;
+
+    // Anti-spam: 3s entre convites quaisquer + 10s mesmo alvo (60s se recusou)
+    const now = Date.now();
+    let cd = inviteCooldowns.get(socket.id);
+    if (!cd) { cd = { lastAnyAt: 0, targets: new Map() }; inviteCooldowns.set(socket.id, cd); }
+    if (now - cd.lastAnyAt < 3000) {
+      socket.emit('duel_invite_rate_limited', { reason: 'cooldown', waitMs: 3000 - (now - cd.lastAnyAt) });
+      return;
+    }
+    const blockedUntil = cd.targets.get(targetSocketId) || 0;
+    if (now < blockedUntil) {
+      socket.emit('duel_invite_rate_limited', { reason: 'target_cooldown', waitMs: blockedUntil - now });
+      return;
+    }
+    cd.lastAnyAt = now;
+    cd.targets.set(targetSocketId, now + 10_000); // bloqueia mesmo alvo por 10s
+
     const duelId = genId();
     io.to(targetSocketId).emit('duel_invite_received', {
       duelId,
@@ -1433,6 +1453,9 @@ io.on('connection', socket => {
   socket.on('duel_invite_response', ({ duelId, fromSocketId, accepted }) => {
     const from = onlineUsers.get(fromSocketId);
     if (!accepted) {
+      // Estende cooldown do quem convidou para 60s contra esse alvo
+      const cd = inviteCooldowns.get(fromSocketId);
+      if (cd) cd.targets.set(socket.id, Date.now() + 60_000);
       io.to(fromSocketId).emit('duel_invite_declined', { duelId, declinedBy: socket.id });
       return;
     }
@@ -1502,6 +1525,7 @@ io.on('connection', socket => {
   socket.on('disconnect', () => {
     const me = onlineUsers.get(socket.id);
     lastTauntAt.delete(socket.id);
+    inviteCooldowns.delete(socket.id);
     if (!me) return;
 
     // Remove from queue
