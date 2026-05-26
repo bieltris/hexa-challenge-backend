@@ -3,6 +3,7 @@ require('dotenv').config();
 const http    = require('http');
 const express = require('express');
 const cors    = require('cors');
+const compression = require('compression');
 const { Server } = require('socket.io');
 const path    = require('path');
 const multer  = require('multer');
@@ -23,7 +24,8 @@ const server = http.createServer(app);
 const io     = new Server(server, { cors: { origin: '*', methods: ['GET','POST'] } });
 const PORT   = process.env.PORT || 3000;
 
-app.use(cors());
+app.use(cors({ exposedHeaders: ['X-Has-More'] }));
+app.use(compression()); // gzip responses ≥1KB (~70% redução em JSON)
 app.use(express.json());
 
 const SALA_NAMES = {
@@ -576,8 +578,21 @@ app.post('/api/comments', async (req, res) => {
 });
 
 // ── GET /api/comments ─────────────────────────────────────────────────────────
+// Query params:
+//   ?limit=20     → quantos retornar (default 20, max 50)
+//   ?before=<id>  → cursor: retorna apenas comentários com id < <id>
+// Sem cursor = primeira página (mais recentes).
 app.get('/api/comments', async (req, res) => {
   try {
+    const limitRaw = parseInt(req.query.limit, 10);
+    const limit = Math.min(Math.max(isNaN(limitRaw) ? 20 : limitRaw, 1), 50);
+    const beforeRaw = parseInt(req.query.before, 10);
+    const hasCursor = !isNaN(beforeRaw);
+
+    const params = hasCursor ? [beforeRaw, limit] : [limit];
+    const cursorClause = hasCursor ? 'AND c.id < $1' : '';
+    const limitParam = hasCursor ? '$2' : '$1';
+
     const result = await pool.query(
       `SELECT c.id, c.sala, c.body, c.player_name, c.player_photo, c.is_pele,
               c.created_at, c.likes, c.author_name, c.author_sala,
@@ -588,14 +603,18 @@ app.get('/api/comments', async (req, res) => {
            ON p.name = c.author_name AND p.sala = c.author_sala
         WHERE c.moderation IN ('approved', 'pending')
           AND c.report_count < 3
-        ORDER BY c.created_at DESC
-        LIMIT 200`
+          ${cursorClause}
+        ORDER BY c.id DESC
+        LIMIT ${limitParam}`,
+      params
     );
     const rows = result.rows.map(r => {
       if (!r.author_name) return r;
       const rank = rankOf(r.author_goals);
       return { ...r, author_rank_label: rank.label, author_rank_color: rank.color };
     });
+    // hasMore via header — mantém response array (backwards compat)
+    res.set('X-Has-More', rows.length === limit ? '1' : '0');
     res.json(rows);
   } catch (err) {
     console.error('[GET /api/comments]', err.message);
