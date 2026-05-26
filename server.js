@@ -24,6 +24,7 @@ const server = http.createServer(app);
 const io     = new Server(server, { cors: { origin: '*', methods: ['GET','POST'] } });
 const PORT   = process.env.PORT || 3000;
 
+app.set('trust proxy', 1); // Render fica atrás de proxy — pega IP real em req.ip
 app.use(cors({ exposedHeaders: ['X-Has-More'] }));
 app.use(compression()); // gzip responses ≥1KB (~70% redução em JSON)
 app.use(express.json());
@@ -338,6 +339,23 @@ app.get('/api/map/regions', async (req, res) => {
   }
 });
 
+// Log de gols/tentativas (fire-and-forget; nao bloqueia resposta).
+// Permite calcular gols/min retroativo e detectar anomalias.
+function logGoalEvent({ name, sala, source, goals = 0, attempts = 0, ip }) {
+  pool.query(
+    `INSERT INTO goal_events(name, sala, source, goals, attempts, ip)
+     VALUES($1, $2, $3, $4, $5, $6)`,
+    [
+      name && name.trim() ? name.trim().slice(0, 100) : null,
+      sala,
+      String(source || 'other').slice(0, 24),
+      Number.isFinite(goals)    ? Math.trunc(goals)    : 0,
+      Number.isFinite(attempts) ? Math.trunc(attempts) : 0,
+      ip ? String(ip).slice(0, 64) : null,
+    ]
+  ).catch(err => console.error('[goal_events]', err.message));
+}
+
 // ── POST /api/shoot ───────────────────────────────────────────────────────────
 // Body: { sala: "6ano", scored: true|false }
 app.post('/api/shoot', async (req, res) => {
@@ -398,6 +416,11 @@ app.post('/api/shoot', async (req, res) => {
         }
       }
     }
+
+    logGoalEvent({
+      name, sala, source: 'penalty',
+      goals: scored ? 1 : 0, attempts: 1, ip: req.ip,
+    });
 
     res.json({ ...result.rows[0], mission: mission ? toMissionDto(mission) : null });
   } catch (err) {
@@ -900,6 +923,11 @@ app.post('/api/penalty', async (req, res) => {
         );
       }
     }
+    logGoalEvent({
+      name, sala, source: 'penalty_deduct',
+      goals: -deduct, attempts: 0, ip: req.ip,
+    });
+
     res.json({ ok: true });
   } catch (err) {
     console.error('[POST /api/penalty]', err.message);
@@ -909,7 +937,7 @@ app.post('/api/penalty', async (req, res) => {
 
 // ── POST /api/award ───────────────────────────────────────────────────────────
 app.post('/api/award', async (req, res) => {
-  const { sala, points, name } = req.body;
+  const { sala, points, name, source } = req.body;
   const VALID = ['6ano','7ano','8ano','9ano','1medio','2medio','3medio'];
   if (!sala || !VALID.includes(sala) || typeof points !== 'number' || points < 1) {
     return res.status(400).json({ error: 'sala e points obrigatórios' });
@@ -932,6 +960,11 @@ app.post('/api/award', async (req, res) => {
         );
       }
     }
+    logGoalEvent({
+      name, sala, source: source || 'award',
+      goals: safePoints, attempts: 0, ip: req.ip,
+    });
+
     res.json({ ok: true });
   } catch (err) {
     console.error('[POST /api/award]', err.message);
@@ -1095,6 +1128,26 @@ async function initDb() {
     );
 
     CREATE INDEX IF NOT EXISTS idx_audit_log_comment ON audit_log(comment_id);
+
+    -- Plano 5: createdAt + log de eventos de gol para historico/telemetria
+    ALTER TABLE scores        ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+    ALTER TABLE player_scores ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW();
+
+    -- Log imutavel de eventos de gol/tentativa. Permite calcular gols/min,
+    -- detectar anomalias (ex: 100 gols em 1s = rajada), e auditoria.
+    CREATE TABLE IF NOT EXISTS goal_events (
+      id         BIGSERIAL PRIMARY KEY,
+      name       VARCHAR(100),
+      sala       VARCHAR(20) NOT NULL,
+      source     VARCHAR(24) NOT NULL,  -- 'penalty' | 'precise' | 'arrow' | 'quiz' | 'duel' | 'admin' | 'other'
+      goals      INTEGER NOT NULL DEFAULT 0,
+      attempts   INTEGER NOT NULL DEFAULT 0,
+      ip         VARCHAR(64),
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_goal_events_created  ON goal_events(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_goal_events_name     ON goal_events(name, sala, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_goal_events_sala     ON goal_events(sala, created_at DESC);
   `);
 
   // Insere perguntas apenas se tabela estiver vazia
@@ -1286,6 +1339,8 @@ async function endDuel(duelId, winnerSid, reason) {
         'UPDATE scores SET goals = GREATEST(goals - $1, 0), updated_at = NOW() WHERE sala = $2',
         [pts, loser.sala]
       );
+      logGoalEvent({ name: winner.name, sala: winner.sala, source: 'duel_win',  goals:  pts });
+      logGoalEvent({ name: loser.name,  sala: loser.sala,  source: 'duel_loss', goals: -pts });
     } catch(e) { console.error('[duel endDuel]', e.message); }
   }
 
